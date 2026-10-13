@@ -55,6 +55,7 @@ final class Engine {
     private let border = FocusBorder()
     private let dim = DimOverlay()
     private let minimap = Minimap()
+    private let notice = Notice()
     private var tabBars: [WindowID: TabBar] = [:]
     private let session = SessionStore()
 
@@ -124,9 +125,8 @@ final class Engine {
 
         installWorkspaceObservers()
         installMouseMonitors()
-        registerHotkeys()
-        swipe.fingers = config.swipeGestureFingers.rawValue
-        swipe.start()
+        lastManaged = Dictionary(displays.map { ($0.uuid, isManaged($0)) }, uniquingKeysWith: { a, _ in a })
+        updateInputState(force: true)
         reconcileTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in self?.reconcile() }
         syncFocus()
     }
@@ -143,6 +143,8 @@ final class Engine {
         revealHiddenWindows()
         reconcileTimer?.invalidate()
         swipe.stop()
+        inputActive = false
+        pauseReason = nil
         for o in workspaceObservers { NSWorkspace.shared.notificationCenter.removeObserver(o); NotificationCenter.default.removeObserver(o) }
         workspaceObservers.removeAll()
         for m in mouseMonitors { NSEvent.removeMonitor(m) }
@@ -203,46 +205,135 @@ final class Engine {
         if old.swipeGestureFingers != new.swipeGestureFingers {
             swipe.stop()
             swipe.fingers = new.swipeGestureFingers.rawValue
-            swipe.start()
+            if inputActive { swipe.start() }
         }
         guard status == .running else { return }
-        if old.ignoredDisplays != new.ignoredDisplays || old.rules != new.rules {
+        let profileChanged = old.builtinDisplay != new.builtinDisplay || old.externalDisplays != new.externalDisplays
+            || old.displayOverrides != new.displayOverrides
+        if profileChanged {
+            displayPolicyChanged(announce: false)
+        } else if old.rules != new.rules {
             rebuildForRules()
+        }
+        if old.pauseForApps != new.pauseForApps || old.releaseInputWhenIdle != new.releaseInputWhenIdle {
+            updateInputState()
         }
         for key in visibleKeys { relayout(key, animated: true, reveal: true) }
         updateDecorations()
     }
 
+    /// Animation follows macOS Reduce motion and, optionally, turns off on
+    /// battery or in Low Power Mode.
     private func applyMotionSettings() {
-        animator.spring = config.spring
+        var spring = config.spring
+        let reduce = config.respectReduceMotion && NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let battery = config.reduceMotionOnBattery && Power.isSaving
+        if reduce || battery { spring.duration = 0 }
+        if spring != animator.spring {
+            animator.spring = spring
+            if reduce || battery { log("animation off (\(reduce ? "Reduce motion" : "battery"))") }
+        }
     }
 
     func registerHotkeys() {
         Hotkeys.shared.handler = { [weak self] action in _ = self?.perform(action) }
-        if status == .running {
+        if status == .running && inputActive {
             Hotkeys.shared.register(config.bindings)
         } else {
             Hotkeys.shared.register(config.bindings, only: [.toggleManager, .start])
         }
     }
 
-    /// Re-checks every window against the rules and ignored displays.
+    /// Re-checks every window against the rules and the display profile.
+    /// Windows on a display that stops being managed are brought into view
+    /// and left alone; their strip is remembered for when it comes back.
     private func rebuildForRules() {
+        var leaving: [String: [WindowID]] = [:]
+        var returning: [String: [(ManagedWindow, CGRect)]] = [:]
         for w in windows.values {
             let shouldFloat = rule(for: w)?.floating == true
-            let onIgnored = config.ignoredDisplays.contains(displayFor(window: w).uuid)
-            if (shouldFloat || onIgnored) && stripKey(of: w.id) != nil {
-                bringOnScreen(w.id)
-                removeFromStrips(w.id)
+            let onIgnored = !isManaged(displayFor(window: w))
+            if shouldFloat || onIgnored, let key = stripKey(of: w.id) {
+                leaving[key, default: []].append(w.id)
                 w.floating = shouldFloat
                 w.onIgnoredDisplay = onIgnored
-            } else if !shouldFloat && !onIgnored && w.onIgnoredDisplay {
+            } else if !onIgnored && w.onIgnoredDisplay {
                 w.onIgnoredDisplay = false
-                if !w.floating { place(w, focus: false) }
+                guard !w.floating, !w.minimized, !w.appHidden, !w.fullscreen, let frame = w.element.frame else { continue }
+                returning[stripKeyFor(frame: frame, window: w), default: []].append((w, frame))
             }
+        }
+        for (key, ids) in leaving {
+            if let d = display(forKey: key), !isManaged(d), let saved = savedStrip(key) {
+                pendingRestore[key] = saved
+            }
+            for id in ids {
+                bringOnScreen(id)
+                removeFromStrips(id)
+            }
+            if strips[key]?.isEmpty == true { strips[key] = nil } else { relayout(key, animated: true, reveal: true) }
+        }
+        addFresh(returning, mode: .returning)
+        updateTabBars()
+    }
+
+    // MARK: - Display profile
+
+    private func isManaged(_ d: Display) -> Bool {
+        DisplayPolicy.isManaged(d.facts, among: displays.map(\.facts), config: config)
+    }
+
+    /// Which displays were managed the last time we looked, for notices.
+    private var lastManaged: [String: Bool] = [:]
+
+    /// Applies the display profile after displays or settings change.
+    private func displayPolicyChanged(announce: Bool) {
+        rebuildForRules()
+        relayoutAll(animated: true)
+        updateInputState()
+        let now = Dictionary(displays.map { ($0.uuid, isManaged($0)) }, uniquingKeysWith: { a, _ in a })
+        defer { lastManaged = now }
+        guard announce, config.notifyDisplayChanges, !lastManaged.isEmpty else { return }
+        for d in displays where lastManaged[d.uuid].map({ $0 != now[d.uuid] }) ?? (now[d.uuid] == false && displays.count > 1) {
+            let on = now[d.uuid] == true
+            notice.show(on ? "Roller is on for \(d.name)" : "Roller is off for \(d.name)",
+                        detail: DisplayPolicy.reason(d.facts, among: displays.map(\.facts), config: config), on: d)
+            log("display \(d.name): \(on ? "managed" : "not managed")")
         }
     }
 
+    // MARK: - Pausing input
+
+    /// Whether shortcuts and the swipe are live right now.
+    private(set) var inputActive = false
+    /// Why input is paused, for the menu bar menu.
+    private(set) var pauseReason: String?
+
+    /// Frees or reclaims the shortcuts and the swipe: they pause while an
+    /// app from `pause_for_apps` is in front, or (optionally) while no
+    /// display is managed.
+    func updateInputState(force: Bool = false) {
+        var reason: String?
+        if status == .running {
+            let front = NSWorkspace.shared.frontmostApplication
+            if let id = front?.bundleIdentifier, config.pauseForApps.contains(id) {
+                reason = "paused for \(front?.localizedName ?? id)"
+            } else if config.releaseInputWhenIdle, !displays.isEmpty, !displays.contains(where: isManaged) {
+                reason = "no display is managed"
+            }
+        }
+        let active = status == .running && reason == nil
+        pauseReason = reason
+        guard force || active != inputActive else { return }
+        inputActive = active
+        registerHotkeys()
+        swipe.fingers = config.swipeGestureFingers.rawValue
+        if active { swipe.start() } else { swipe.stop() }
+        onStatusChange?(status)
+        log(active ? "input active" : "input paused: \(reason ?? "stopped")")
+    }
+
+    // MARK: - Apps and windows
     // MARK: - Apps and windows
 
     private func addApp(_ app: NSRunningApplication) {
@@ -301,6 +392,21 @@ final class Engine {
                 fresh[stripKeyFor(frame: frame, window: w), default: []].append((w, frame))
             }
         }
+        addFresh(fresh, mode: initial ? .startup : .new)
+    }
+
+    private enum FreshMode {
+        /// Roller is starting: keep the on-screen left-to-right order.
+        case startup
+        /// Windows coming back to a display that is managed again.
+        case returning
+        /// Windows that just appeared: placed per `new_window_position`.
+        case new
+    }
+
+    /// Adds windows to their strips. A strip seen for the first time gets
+    /// its saved layout back (session restore) before anything else.
+    private func addFresh(_ fresh: [String: [(ManagedWindow, CGRect)]], mode: FreshMode) {
         for (key, list) in fresh {
             var strip = strips[key] ?? Strip()
             let byID = Dictionary(list.map { ($0.0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -316,8 +422,6 @@ final class Engine {
                 }
                 log("restored \(strip.allWindows.count) windows on \(key)")
             }
-            // On start, everything else keeps its on-screen left-to-right
-            // order. Later, new windows open next to the focused column.
             let rest = list.filter { !used.contains($0.0.id) }.sorted { $0.1.minX < $1.1.minX }
             let p = display(forKey: key).map(params) ?? nil
             let frontPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
@@ -326,21 +430,31 @@ final class Engine {
                 let width = initialWidth(frame: frame, params: p)
                 if let slot = rule(for: w)?.slot {
                     strip.insert(w.id, width: width, at: slot - 1, focus: false)
-                } else if initial {
+                } else if mode != .new {
                     strip.insert(w.id, width: width, at: strip.columns.count, focus: false)
                 } else {
                     let takeFocus = w.pid == frontPid
-                    strip.insert(w.id, width: width, focus: takeFocus)
+                    strip.insert(w.id, width: width, at: newWindowIndex(strip), focus: takeFocus)
                     if takeFocus { focusNew = w.id }
                 }
             }
             for (w, frame) in list { animator.seed(w.id, frame: frame) }
             strip.normalize()
             strips[key] = strip
-            if !initial {
+            if mode != .startup {
                 relayout(key, animated: true, reveal: true)
                 if let focusNew { focusWindow(focusNew) }
             }
+        }
+    }
+
+    /// Strip index for a new window, following `new_window_position`
+    /// (nil = right after the focused column).
+    private func newWindowIndex(_ strip: Strip) -> Int? {
+        switch config.newWindowPosition {
+        case .next: return nil
+        case .end: return strip.columns.count
+        case .start: return 0
         }
     }
 
@@ -383,7 +497,7 @@ final class Engine {
         if el.isFixedSize || rule(for: w)?.floating == true || pendingFloating.contains(where: { $0.id == id }) {
             w.floating = true
         }
-        if config.ignoredDisplays.contains(displayFor(frame: frame).uuid) { w.onIgnoredDisplay = true }
+        if !isManaged(displayFor(frame: frame)) { w.onIgnoredDisplay = true }
         return (w, frame)
     }
 
@@ -406,7 +520,7 @@ final class Engine {
         guard !strip.contains(w.id) else { return }
         let p = params(display)
         let slot = rule(for: w)?.slot.map { $0 - 1 }
-        strip.insert(w.id, width: initialWidth(frame: frame, params: p), at: index ?? slot, focus: focus)
+        strip.insert(w.id, width: initialWidth(frame: frame, params: p), at: index ?? slot ?? newWindowIndex(strip), focus: focus)
         animator.seed(w.id, frame: frame)
         strips[key] = strip
         relayout(key, animated: true, reveal: focus)
@@ -614,7 +728,7 @@ final class Engine {
     // MARK: - Strips and displays
 
     private var visibleKeys: [String] {
-        displays.filter { !config.ignoredDisplays.contains($0.uuid) && !$0.spaceIsFullscreen }.map(\.stripKey)
+        displays.filter { isManaged($0) && !$0.spaceIsFullscreen }.map(\.stripKey)
     }
 
     func stripKey(of id: WindowID) -> String? {
@@ -719,7 +833,14 @@ final class Engine {
         })
         workspaceObservers.append(nc.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] n in
             if let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication { self?.addApp(app) }
+            self?.updateInputState()
             self?.syncFocus()
+        })
+        workspaceObservers.append(nc.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.applyMotionSettings()
+        })
+        workspaceObservers.append(NotificationCenter.default.addObserver(forName: .NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            self?.applyMotionSettings()
         })
         workspaceObservers.append(nc.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
             self?.spacesChanged()
@@ -742,19 +863,22 @@ final class Engine {
         let oldUUIDs = Set(displays.map(\.uuid))
         displays = Display.all()
         let live = Set(displays.map(\.uuid))
-        // Windows from a display that went away join the main display's strip.
-        if let main = displays.first, oldUUIDs != live {
+        // A display that went away keeps its layout for when it's back; its
+        // windows (which macOS moves to a remaining display) rejoin through
+        // the display profile, after that display's own saved layout.
+        if oldUUIDs != live {
             for (key, strip) in strips where !live.contains(String(key.split(separator: "|").first ?? "")) {
-                var target = strips[main.stripKey] ?? Strip()
-                for c in strip.columns {
-                    for id in c.windows { target.insert(id, width: c.width, at: target.columns.count, focus: false) }
+                if let saved = savedStrip(key) { pendingRestore[key] = saved }
+                for id in strip.allWindows {
+                    windows[id]?.onIgnoredDisplay = true
+                    animator.forget(id)
                 }
-                strips[main.stripKey] = target
                 strips[key] = nil
             }
         }
         minWidths.removeAll()
         relayoutAll(animated: false)
+        displayPolicyChanged(announce: true)
     }
 
     /// Periodic self-healing: picks up windows and apps whose notifications
@@ -789,10 +913,14 @@ final class Engine {
             if !w.floating { place(w, focus: false) }
         }
         let newDisplays = Display.all()
-        if newDisplays != displays {
+        if Set(newDisplays.map(\.uuid)) != Set(displays.map(\.uuid)) {
+            displaysChanged()
+        } else if newDisplays != displays {
             displays = newDisplays
             relayoutAll(animated: false)
         }
+        applyMotionSettings() // picks up plugging in or unplugging power
+        rebuildForRules()     // windows whose display or title changed
         scan(initial: false)
     }
 
@@ -831,8 +959,12 @@ final class Engine {
         var changed = true
 
         switch action {
-        case .focusLeft: changed = strip.focusColumn(by: -1)
-        case .focusRight: changed = strip.focusColumn(by: 1)
+        case .focusLeft:
+            changed = strip.focusColumn(by: -1)
+            if !changed && config.wrapFocus { changed = strip.focusLast() }
+        case .focusRight:
+            changed = strip.focusColumn(by: 1)
+            if !changed && config.wrapFocus { changed = strip.focusFirst() }
         case .focusUp: changed = strip.focusRow(by: -1)
         case .focusDown: changed = strip.focusRow(by: 1)
         case .focusFirst: changed = strip.focusFirst()
@@ -899,7 +1031,7 @@ final class Engine {
     }
 
     private var sortedDisplays: [Display] {
-        displays.filter { !config.ignoredDisplays.contains($0.uuid) }
+        displays.filter { isManaged($0) }
             .sorted { ($0.frame.minX, $0.frame.minY) < ($1.frame.minX, $1.frame.minY) }
     }
 
@@ -1118,7 +1250,7 @@ final class Engine {
     }
 
     private func mouseMoved() {
-        guard config.focusFollowsMouse, status == .running, !mouseDown, swipeKey == nil, !animator.isAnimating else { return }
+        guard config.focusFollowsMouse, status == .running, inputActive, !mouseDown, swipeKey == nil, !animator.isAnimating else { return }
         hoverWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.focusUnderMouse() }
         hoverWork = work
@@ -1212,17 +1344,21 @@ final class Engine {
         let spans = Layout.spans(strip, p)
         let cols = zip(strip.columns, spans).map { c, s in (x: s.x, w: s.w, rows: c.heightFractions, tabbed: c.tabbed) }
         minimap.show(.init(columns: cols, focus: strip.focus, focusRow: strip.focusedColumn?.active ?? 0,
-                           viewX: strip.offset, viewW: Double(p.area.width)), on: display)
+                           viewX: strip.offset, viewW: Double(p.area.width)), on: display,
+                     position: config.minimapPosition, duration: config.minimapDurationMs / 1000)
     }
 
     // MARK: - Session
 
+    private func savedStrip(_ key: String) -> SavedStrip? {
+        guard let strip = strips[key], !strip.isEmpty else { return nil }
+        return SavedStrip(key: key, columns: strip.columns.map { c in
+            SavedColumn(windows: c.windows.compactMap { windows[$0]?.saved }, heights: c.heights, width: c.width, tabbed: c.tabbed)
+        }, focus: strip.focus)
+    }
+
     private func snapshot() -> SavedSession {
-        let saved = strips.map { key, strip in
-            SavedStrip(key: key, columns: strip.columns.map { c in
-                SavedColumn(windows: c.windows.compactMap { windows[$0]?.saved }, heights: c.heights, width: c.width, tabbed: c.tabbed)
-            }, focus: strip.focus)
-        }
+        let saved = strips.keys.compactMap(savedStrip)
         // Strips on Spaces we haven't visited since starting keep their saved layout.
         let unvisited = pendingRestore.filter { strips[$0.key] == nil }.map(\.value)
         let floating = windows.values.filter(\.floating).map(\.saved)

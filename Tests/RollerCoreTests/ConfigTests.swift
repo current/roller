@@ -60,7 +60,7 @@ final class ConfigTests: XCTestCase {
         c.gapInner = 16
         c.centerFocusedColumn = .onOverflow
         c.presetColumnWidths = [0.33333, 0.5, 0.66667]
-        c.ignoredDisplays = ["ABC-123"]
+        c.displayOverrides = ["ABC-123": .off]
         c.focusBorderColor = "#FF8800CC"
         c.swipeGestureFingers = .three
         c.bindings[.focusLeft] = [Shortcut(string: "ctrl+alt+a")!]

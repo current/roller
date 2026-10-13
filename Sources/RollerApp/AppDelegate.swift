@@ -26,13 +26,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if store.config.launchAtLogin != LoginItem.isEnabled { store.config.launchAtLogin = LoginItem.isEnabled }
         let engine = Engine.shared
         engine.config = store.config
-        store.onChange = { config in
+        store.onChange = { [weak self] config in
             Engine.shared.apply(config)
             LoginItem.sync(config.launchAtLogin)
+            self?.statusItem?.isVisible = config.showMenuBarIcon
         }
         engine.onStatusChange = { [weak self] _ in self?.updateStatusIcon() }
 
         setUpStatusItem()
+        statusItem.isVisible = store.config.showMenuBarIcon
         ipc.start()
 
         if store.config.onboardingDone {
@@ -69,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func updateStatusIcon() {
-        let running = Engine.shared.status == .running
+        let running = Engine.shared.status == .running && Engine.shared.inputActive
         let image = NSImage(systemSymbolName: running ? "rectangle.split.3x1.fill" : "rectangle.split.3x1",
                             accessibilityDescription: "Roller")
         image?.isTemplate = true
@@ -82,7 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let engine = Engine.shared
         let state: String
         switch engine.status {
-        case .running: state = "Running"
+        case .running: state = engine.pauseReason.map { "Running, \($0)" } ?? "Running"
         case .stopped: state = "Stopped"
         case .needsPermission: state = "Needs Accessibility permission"
         }

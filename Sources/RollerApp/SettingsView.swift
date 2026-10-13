@@ -10,6 +10,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
     case input = "Trackpad & Mouse"
     case rules = "Window Rules"
     case displays = "Displays"
+    case pausing = "Pausing & Power"
     case shortcuts = "Shortcuts"
     case macSetup = "Mac Setup"
     case help = "Guide"
@@ -24,6 +25,7 @@ enum SettingsPage: String, CaseIterable, Identifiable {
         case .input: return "hand.draw"
         case .rules: return "list.bullet.rectangle"
         case .displays: return "display.2"
+        case .pausing: return "pause.circle"
         case .shortcuts: return "keyboard"
         case .macSetup: return "checkmark.seal"
         case .help: return "book"
@@ -69,6 +71,7 @@ struct SettingsView: View {
         case .input: InputPage()
         case .rules: RulesPage()
         case .displays: DisplaysPage()
+        case .pausing: PausingPage()
         case .shortcuts: ShortcutsPage()
         case .macSetup: MacSetupPage()
         case .help: GuidePage()
@@ -106,6 +109,11 @@ struct GeneralPage: View {
 
             Section {
                 Toggle("Launch at login", isOn: $store.config.launchAtLogin)
+                Toggle("Show icon in the menu bar", isOn: $store.config.showMenuBarIcon)
+                if !store.config.showMenuBarIcon {
+                    Text("To get back here with the icon hidden, open Roller again from Applications, or run roller open_settings.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
                 Toggle("Check for updates daily", isOn: $store.config.checkForUpdates)
                 HStack {
                     Text("Version \(Updater.currentVersion)").foregroundStyle(.secondary)
@@ -179,6 +187,12 @@ struct LayoutPage: View {
                         Text("\(Int((store.config.defaultColumnWidth * 100).rounded()))%").tag(store.config.defaultColumnWidth)
                     }
                 }
+                Picker("New windows open", selection: $store.config.newWindowPosition) {
+                    Text("Next to the focused window").tag(NewWindowPosition.next)
+                    Text("At the end of the strip").tag(NewWindowPosition.end)
+                    Text("At the start of the strip").tag(NewWindowPosition.start)
+                }
+                Toggle("Wrap around when focusing past either end", isOn: $store.config.wrapFocus)
                 Picker("Center the focused column", selection: $store.config.centerFocusedColumn) {
                     Text("Never").tag(CenterMode.never)
                     Text("On overflow").tag(CenterMode.onOverflow)
@@ -283,12 +297,21 @@ struct AppearancePage: View {
 
             Section {
                 Toggle("Show the strip minimap while navigating", isOn: $store.config.minimap)
+                if store.config.minimap {
+                    Picker("Minimap position", selection: $store.config.minimapPosition) {
+                        Text("Top of the screen").tag(MinimapPosition.top)
+                        Text("Bottom of the screen").tag(MinimapPosition.bottom)
+                    }
+                    SliderRow(title: "Minimap stays for", value: $store.config.minimapDurationMs, range: 300...5000, step: 100, unit: "ms")
+                }
                 SliderRow(title: "Tab bar height", value: $store.config.tabBarHeight, range: 16...48, step: 1, unit: "pt")
             } header: { Text("Overlays") }
 
             Section {
                 SliderRow(title: "Duration", value: $store.config.animationDurationMs, range: 0...1500, step: 10, unit: "ms")
                 SliderRow(title: "Damping", value: $store.config.animationDamping, range: 0.1...1, step: 0.05, unit: "", format: "%.2f")
+                Toggle("Follow the macOS Reduce motion setting", isOn: $store.config.respectReduceMotion)
+                Toggle("Turn animation off on battery or in Low Power Mode", isOn: $store.config.reduceMotionOnBattery)
             } header: { Text("Motion") } footer: {
                 Text("A spring synced to your display's refresh rate. 0 ms turns animation off. Damping 1.0 settles without overshoot; lower values bounce.")
             }
@@ -433,34 +456,196 @@ struct RuleRow: View {
 
 // MARK: - Displays
 
+/// Ready-made display profiles.
+private struct DisplayPreset: Identifiable {
+    let id: String
+    let title: String
+    let detail: String
+    let builtin: DisplayMode
+    let external: DisplayMode
+
+    static let all: [DisplayPreset] = [
+        .init(id: "everywhere", title: "Everywhere", detail: "Every display, all the time.", builtin: .always, external: .always),
+        .init(id: "onthego", title: "Laptop on the go", detail: "Only the built-in screen, and only while no monitor is connected. Plug in a display and Roller steps aside.", builtin: .alone, external: .never),
+        .init(id: "docked", title: "Monitors when docked", detail: "External displays always; the built-in screen only when it's on its own.", builtin: .alone, external: .always),
+        .init(id: "external", title: "External displays only", detail: "Never the built-in screen.", builtin: .never, external: .always),
+        .init(id: "builtin", title: "Built-in screen only", detail: "Never external displays.", builtin: .always, external: .never),
+    ]
+}
+
 struct DisplaysPage: View {
     @EnvironmentObject var store: ConfigStore
     @State private var displays = Display.all()
 
     var body: some View {
+        let facts = displays.map(\.facts)
         Form {
             Section {
-                ForEach(displays, id: \.uuid) { d in
-                    Toggle(isOn: Binding(
-                        get: { !store.config.ignoredDisplays.contains(d.uuid) },
-                        set: { on in
-                            if on { store.config.ignoredDisplays.removeAll { $0 == d.uuid } }
-                            else if !store.config.ignoredDisplays.contains(d.uuid) { store.config.ignoredDisplays.append(d.uuid) }
-                        })) {
-                        VStack(alignment: .leading) {
-                            Text(d.name)
-                            Text("\(Int(d.frame.width)) × \(Int(d.frame.height)) points").font(.caption).foregroundStyle(.secondary)
+                ForEach(DisplayPreset.all) { preset in
+                    let selected = store.config.builtinDisplay == preset.builtin && store.config.externalDisplays == preset.external
+                    Button {
+                        store.config.builtinDisplay = preset.builtin
+                        store.config.externalDisplays = preset.external
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preset.title)
+                                Text(preset.detail).font(.callout).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer()
                         }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            } header: { Text("Quick setup") }
+
+            Section {
+                Picker("Built-in display", selection: $store.config.builtinDisplay) {
+                    Text("Always").tag(DisplayMode.always)
+                    Text("Only when no other display is connected").tag(DisplayMode.alone)
+                    Text("Never").tag(DisplayMode.never)
+                }
+                Picker("External displays", selection: $store.config.externalDisplays) {
+                    Text("Always").tag(DisplayMode.always)
+                    Text("Only when it's the only display (lid closed)").tag(DisplayMode.alone)
+                    Text("Never").tag(DisplayMode.never)
+                }
+                Toggle("Show a notice when a display change turns Roller on or off", isOn: $store.config.notifyDisplayChanges)
+                Toggle("Free the shortcuts and the swipe while no display is managed", isOn: $store.config.releaseInputWhenIdle)
+            } header: { Text("Display profile") } footer: {
+                Text("Roller checks this every time a display is connected or disconnected. On a display it stops managing, hidden windows come back into view and stay where they are; the strip is remembered and returns when the display is managed again.")
+            }
+
+            Section {
+                ForEach(displays, id: \.uuid) { d in
+                    let managed = DisplayPolicy.isManaged(d.facts, among: facts, config: store.config)
+                    HStack(alignment: .top) {
+                        Circle().fill(managed ? Color.green : Color.secondary.opacity(0.5))
+                            .frame(width: 9, height: 9).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(d.name)
+                                Text(d.isBuiltin ? "Built-in" : "External")
+                                    .font(.caption)
+                                    .padding(.horizontal, 6).padding(.vertical, 1)
+                                    .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                            }
+                            Text("\(Int(d.frame.width)) × \(Int(d.frame.height)) · " + DisplayPolicy.reason(d.facts, among: facts, config: store.config))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { store.config.displayOverrides[d.uuid].map { $0.rawValue } ?? "auto" },
+                            set: { store.config.displayOverrides[d.uuid] = DisplayOverride(rawValue: $0) })) {
+                            Text("Follow profile").tag("auto")
+                            Text("Always on").tag(DisplayOverride.on.rawValue)
+                            Text("Always off").tag(DisplayOverride.off.rawValue)
+                        }
+                        .fixedSize()
                     }
                 }
-            } header: { Text("Manage these displays") } footer: {
-                Text("Each display has its own strip. Switch Roller off for a display, like a presentation screen or a portrait monitor, and its windows stay exactly where you put them. For multiple displays, arranging them above or below each other works best: toward a side-by-side display a window can only slide halfway off before it hides.")
+            } header: { Text("Connected now") } footer: {
+                Text("An override wins over the profile for that one display, e.g. to keep Roller off a presentation screen or a portrait monitor. Displays are remembered by their ID, so the setting comes back when you reconnect it.")
+            }
+
+            let remembered = store.config.displayOverrides.keys.filter { uuid in !displays.contains { $0.uuid == uuid } }.sorted()
+            if !remembered.isEmpty {
+                Section {
+                    ForEach(remembered, id: \.self) { uuid in
+                        HStack {
+                            Text(uuid).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            Spacer()
+                            Text(store.config.displayOverrides[uuid] == .on ? "Always on" : "Always off").foregroundStyle(.secondary)
+                            Button("Forget") { store.config.displayOverrides[uuid] = nil }
+                        }
+                    }
+                } header: { Text("Overrides for displays not connected") }
+            }
+
+            Section {
+                Text("Each managed display has its own strip, and each macOS Space too. When displays sit side by side, a window can only slide halfway off toward the neighbour before it hides; arranging displays above or below each other in System Settings › Displays avoids that.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)) { _ in
             displays = Display.all()
         }
+    }
+}
+
+// MARK: - Pausing & power
+
+struct PausingPage: View {
+    @EnvironmentObject var store: ConfigStore
+    @State private var selection: String?
+
+    var body: some View {
+        Form {
+            Section {
+                if store.config.pauseForApps.isEmpty {
+                    Text("No apps yet.").foregroundStyle(.secondary)
+                }
+                ForEach(store.config.pauseForApps, id: \.self) { id in
+                    HStack {
+                        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+                            Image(nsImage: NSWorkspace.shared.icon(forFile: url.path)).resizable().frame(width: 18, height: 18)
+                            Text(FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: ""))
+                        } else {
+                            Text(id)
+                        }
+                        Text(id).font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            store.config.pauseForApps.removeAll { $0 == id }
+                        } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                HStack {
+                    Menu("Add Running App") {
+                        ForEach(runningApps, id: \.0) { id, name in
+                            Button(name) { add(id) }
+                        }
+                    }
+                    .fixedSize()
+                    Button("Choose an App…", action: chooseApp)
+                }
+            } header: { Text("Pause while these apps are in front") } footer: {
+                Text("Roller's shortcuts, trackpad swipe and focus follows mouse pause while one of these apps is active, so its own ⌃⌥ shortcuts and gestures work. Good for games, virtual machines and remote desktops. Windows stay on the strip.")
+            }
+
+            Section {
+                Toggle("Free the shortcuts and the swipe while no display is managed", isOn: $store.config.releaseInputWhenIdle)
+                Toggle("Turn animation off on battery or in Low Power Mode", isOn: $store.config.reduceMotionOnBattery)
+                Toggle("Follow the macOS Reduce motion setting", isOn: $store.config.respectReduceMotion)
+            } header: { Text("Idle and power") }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var runningApps: [(String, String)] {
+        NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }
+            .filter { !store.config.pauseForApps.contains($0.0) }
+            .sorted { $0.1.localizedCaseInsensitiveCompare($1.1) == .orderedAscending }
+    }
+
+    private func add(_ id: String) {
+        if !store.config.pauseForApps.contains(id) { store.config.pauseForApps.append(id) }
+    }
+
+    private func chooseApp() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        guard panel.runModal() == .OK, let url = panel.url, let id = Bundle(url: url)?.bundleIdentifier else { return }
+        add(id)
     }
 }
 

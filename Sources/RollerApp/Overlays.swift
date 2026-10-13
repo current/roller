@@ -118,11 +118,12 @@ final class Minimap {
         panel.level = .statusBar
     }
 
-    func show(_ s: Snapshot, on display: Display) {
+    func show(_ s: Snapshot, on display: Display, position: MinimapPosition = .top, duration: Double = 1.1) {
         view.snapshot = s
         let width = min(max(display.visibleFrame.width * 0.32, 220), 520)
         let height: CGFloat = 64
-        let frame = CGRect(x: display.visibleFrame.midX - width / 2, y: display.visibleFrame.minY + 10, width: width, height: height)
+        let y = position == .top ? display.visibleFrame.minY + 10 : display.visibleFrame.maxY - height - 10
+        let frame = CGRect(x: display.visibleFrame.midX - width / 2, y: y, width: width, height: height)
         panel.setFrame(Geometry.toCocoa(frame), display: false)
         view.needsDisplay = true
         panel.alphaValue = 1
@@ -137,7 +138,7 @@ final class Minimap {
             })
         }
         hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
     }
 
     func hide() {
@@ -263,5 +264,63 @@ final class TabBar {
             contentTintColor = isActive ? .white : .labelColor
             font = .systemFont(ofSize: 11, weight: isActive ? .semibold : .regular)
         }
+    }
+}
+
+// MARK: - Notice
+
+/// A short message near the top of a display, e.g. when plugging in a
+/// monitor switches Roller off for the built-in screen.
+final class Notice {
+    private let panel = OverlayPanel()
+    private let title = NSTextField(labelWithString: "")
+    private let detail = NSTextField(labelWithString: "")
+    private var hideWork: DispatchWorkItem?
+
+    init() {
+        let effect = NSVisualEffectView()
+        effect.material = .hudWindow
+        effect.blendingMode = .behindWindow
+        effect.state = .active
+        effect.wantsLayer = true
+        effect.layer?.cornerRadius = 12
+        effect.layer?.masksToBounds = true
+        title.font = .systemFont(ofSize: 14, weight: .semibold)
+        detail.font = .systemFont(ofSize: 12)
+        detail.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [title, detail])
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        effect.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.centerXAnchor.constraint(equalTo: effect.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: effect.centerYAnchor),
+        ])
+        panel.contentView = effect
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .transient, .ignoresCycle, .fullScreenAuxiliary]
+    }
+
+    func show(_ text: String, detail more: String, on display: Display) {
+        title.stringValue = text
+        detail.stringValue = more
+        let width = max(title.intrinsicContentSize.width, detail.intrinsicContentSize.width) + 48
+        let frame = CGRect(x: display.visibleFrame.midX - width / 2, y: display.visibleFrame.minY + 40, width: width, height: 58)
+        panel.setFrame(Geometry.toCocoa(frame), display: true)
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+        hideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.3
+                self?.panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                if self?.panel.alphaValue == 0 { self?.panel.orderOut(nil) }
+            })
+        }
+        hideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: work)
     }
 }

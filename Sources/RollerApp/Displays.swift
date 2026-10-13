@@ -1,4 +1,5 @@
 import AppKit
+import IOKit.ps
 import RollerCore
 
 enum Spaces {
@@ -48,6 +49,10 @@ struct Display: Equatable {
     /// Current Space id ("0" if unknown).
     var space: UInt64 = 0
     var spaceIsFullscreen = false
+    /// The Mac's own screen (a MacBook or iMac panel).
+    var isBuiltin = false
+
+    var facts: DisplayFacts { DisplayFacts(uuid: uuid, isBuiltin: isBuiltin) }
 
     var stripKey: String { "\(uuid)|\(space)" }
 
@@ -69,7 +74,7 @@ struct Display: Equatable {
             below.size.height = screen.visibleFrame.maxY - screen.frame.minY
             return Display(id: id, uuid: uuid, name: screen.localizedName,
                            frame: flip(screen.frame), visibleFrame: flip(screen.visibleFrame),
-                           frameBelowMenuBar: flip(below))
+                           frameBelowMenuBar: flip(below), isBuiltin: CGDisplayIsBuiltin(id) != 0)
         }
         let frames = displays.map(\.frame)
         let spaces = Spaces.current()
@@ -99,4 +104,14 @@ enum Geometry {
     }
 
     static var mouseLocation: CGPoint { toQuartz(NSEvent.mouseLocation) }
+}
+
+enum Power {
+    /// On battery power, or in Low Power Mode.
+    static var isSaving: Bool {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return true }
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() as String? else { return false }
+        return type == kIOPMBatteryPowerKey
+    }
 }

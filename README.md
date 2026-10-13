@@ -22,10 +22,13 @@ Roller is a native Swift app that lives in the menu bar. It needs only the Acces
 - **Minimap.** A small map of the strip appears while you navigate.
 - **Trackpad swipe.** A 3-, 4- or 5-finger swipe moves the strip with your fingers and settles on the nearest column.
 - **Drag to reorder.** Drop a window onto another column to move it there, or onto another display.
-- **Multiple displays.** Each display gets its own strip, with "send to next display" and a per-display on/off switch.
+- **Multiple displays.** Each display gets its own strip, with "send to next display".
+- **Display profiles.** Choose when Roller manages the built-in screen and when it manages external displays: always, only while that display is the only one connected, or never. For example, it can run on your MacBook's screen on the go and step aside the moment you plug in a monitor. Per-display overrides cover the exceptions, and a notice shows when a display change switches Roller on or off.
+- **Pausing.** Shortcuts, the swipe and focus follows mouse pause while chosen apps are in front, such as games, VMs or remote desktops. They can also free up while no display is managed.
+- **Power aware.** Roller follows macOS Reduce motion, and can optionally turn animation off on battery or in Low Power Mode.
 - **Session restore.** Column order, widths, stacks and tabs survive a restart.
 - **Window rules.** Match a bundle ID and/or a title regex, then float the window or give it a fixed place on the strip. Fixed-size windows such as Calculator, dialogs and Roller's own windows float automatically.
-- **Optional extras.** A focus border, dimming of inactive windows, focus follows mouse and mouse follows focus. All are off by default.
+- **Optional extras.** A focus border, dimming of inactive windows, focus follows mouse, mouse follows focus, and focus that wraps around at the ends of the strip. All are off by default. You can also choose where new windows open (next to the focused one, at the end or at the start), where the minimap sits and how long it stays, and hide the menu bar icon.
 - **No focus stealing.** A background app that opens a window doesn't take focus or scroll the strip.
 - **Native full screen is left alone.**
 - **Automation.** A `roller://` URL scheme, a `roller` CLI and Raycast script commands.
@@ -90,6 +93,20 @@ Every default uses ⌃⌥ (Control-Option). Plain ⌥ stays free for typing char
 | Stop / start Roller | ⌃⌥Q |
 | Scroll the strip | 4-finger swipe left or right on the trackpad |
 
+## Displays
+
+The **Displays** page has quick setups for the common cases:
+
+| Quick setup | Built-in screen | External displays |
+|---|---|---|
+| Everywhere | always | always |
+| Laptop on the go | only when no monitor is connected | never |
+| Monitors when docked | only when no monitor is connected | always |
+| External displays only | never | always |
+| Built-in screen only | always | never |
+
+Roller re-checks the profile whenever a display is connected or disconnected. On a display it stops managing, hidden windows come back into view and stay where they are. The strip's layout is remembered and returns when the display is managed again. A per-display override (always on / always off) wins over the profile. Overrides are remembered by display ID, so they come back when you reconnect that display.
+
 ## Configuration
 
 The settings window covers everything. It writes `~/.roller.toml`, and Roller also reads `$XDG_CONFIG_HOME/roller/roller.toml` or `~/.config/roller/roller.toml` if one of those exists. Edits you make to the file are picked up live. Choose **Open Configuration** in the menu bar menu to find it.
@@ -104,6 +121,8 @@ center_focused_column = "never"  # never | on-overflow | always
 dock_aware = true
 width_step = 0.1
 height_step = 0.1
+new_window_position = "next"     # next | end | start
+wrap_focus = false               # focus wraps around at the ends
 focus_border = false
 focus_border_width = 3.0
 focus_border_color = "#3D8BFDFF" # #RRGGBB or #RRGGBBAA
@@ -111,9 +130,13 @@ focus_border_radius = 10.0
 dim_inactive = false
 dim_inactive_opacity = 0.25
 minimap = true
+minimap_position = "top"         # top | bottom
+minimap_duration_ms = 1100.0
 tab_bar_height = 26.0
 animation_duration_ms = 500.0    # 0 turns animation off
 animation_damping = 0.9          # 1.0 = no overshoot, lower bounces
+respect_reduce_motion = true     # follow macOS Reduce motion
+reduce_motion_on_battery = false # no animation on battery / Low Power Mode
 focus_follows_mouse = false
 mouse_follows_focus = false
 swipe_gesture_fingers = 4        # 3, 4, 5 or 0 = off
@@ -122,7 +145,13 @@ swipe_sensitivity = 1.0
 drag_to_reorder = true
 launch_at_login = false
 check_for_updates = true
-ignored_displays = []            # display UUIDs Roller leaves alone
+show_menu_bar_icon = true
+builtin_display = "always"       # always | alone (only when no other display) | never
+external_displays = "always"     # always | alone (lid closed) | never
+display_overrides = {}           # { "<display UUID>" = "on" | "off" }
+notify_display_changes = true
+release_input_when_idle = true   # free shortcuts and swipe when no display is managed
+pause_for_apps = []              # bundle IDs, e.g. ["com.parallels.desktop.console"]
 
 [bindings]
 focus_left = ["ctrl+alt+h", "ctrl+alt+left"]

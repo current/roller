@@ -57,6 +57,10 @@ public struct Config: Equatable {
     public var dockAware: Bool = true
     public var widthStep: Double = 0.1
     public var heightStep: Double = 0.1
+    /// Where new windows join the strip.
+    public var newWindowPosition: NewWindowPosition = .next
+    /// Focusing past either end of the strip wraps around to the other end.
+    public var wrapFocus: Bool = false
 
     // Appearance
     public var focusBorder: Bool = false
@@ -66,11 +70,17 @@ public struct Config: Equatable {
     public var dimInactive: Bool = false
     public var dimInactiveOpacity: Double = 0.25
     public var minimap: Bool = true
+    public var minimapPosition: MinimapPosition = .top
+    public var minimapDurationMs: Double = 1100
     public var tabBarHeight: Double = 26
 
     // Motion
     public var animationDurationMs: Double = 500
     public var animationDamping: Double = 0.9
+    /// Follow macOS's Accessibility › Display › Reduce motion setting.
+    public var respectReduceMotion: Bool = true
+    /// Turn animation off while on battery or in Low Power Mode.
+    public var reduceMotionOnBattery: Bool = false
 
     // Mouse & trackpad
     public var focusFollowsMouse: Bool = false
@@ -80,9 +90,27 @@ public struct Config: Equatable {
     public var swipeSensitivity: Double = 1.0
     public var dragToReorder: Bool = true
 
+    // Displays
+    /// When to manage the Mac's built-in screen.
+    public var builtinDisplay: DisplayMode = .always
+    /// When to manage external displays.
+    public var externalDisplays: DisplayMode = .always
+    /// Per-display overrides by display UUID; they win over the two modes.
+    public var displayOverrides: [String: DisplayOverride] = [:]
+    /// Show a short notice when a display change switches Roller on or off
+    /// for a display.
+    public var notifyDisplayChanges: Bool = true
+    /// Free the shortcuts and the swipe while no display is managed.
+    public var releaseInputWhenIdle: Bool = true
+
+    // Pausing
+    /// While one of these apps (bundle IDs) is in front, Roller's shortcuts,
+    /// swipe and focus follows mouse pause. For games, VMs, remote desktops.
+    public var pauseForApps: [String] = []
+
     // App
     public var launchAtLogin: Bool = false
-    public var ignoredDisplays: [String] = []
+    public var showMenuBarIcon: Bool = true
     public var onboardingDone: Bool = false
     /// Look for a newer release on GitHub once a day.
     public var checkForUpdates: Bool = true
@@ -170,6 +198,7 @@ public struct Config: Equatable {
         focusBorderRadius = min(max(focusBorderRadius, 0), 40)
         dimInactiveOpacity = min(max(dimInactiveOpacity, 0.05), 0.9)
         tabBarHeight = min(max(tabBarHeight, 16), 48)
+        minimapDurationMs = min(max(minimapDurationMs, 300), 5000)
         animationDurationMs = min(max(animationDurationMs, 0), 2000)
         animationDamping = min(max(animationDamping, 0.1), 1)
         swipeSensitivity = min(max(swipeSensitivity, 0.1), 5)
@@ -198,6 +227,8 @@ extension Config {
         b("dock_aware", &c.dockAware)
         d("width_step", &c.widthStep)
         d("height_step", &c.heightStep)
+        if let v = o["new_window_position"]?.string, let m = NewWindowPosition(rawValue: v) { c.newWindowPosition = m }
+        b("wrap_focus", &c.wrapFocus)
         b("focus_border", &c.focusBorder)
         d("focus_border_width", &c.focusBorderWidth)
         s("focus_border_color", &c.focusBorderColor)
@@ -205,9 +236,13 @@ extension Config {
         b("dim_inactive", &c.dimInactive)
         d("dim_inactive_opacity", &c.dimInactiveOpacity)
         b("minimap", &c.minimap)
+        if let v = o["minimap_position"]?.string, let m = MinimapPosition(rawValue: v) { c.minimapPosition = m }
+        d("minimap_duration_ms", &c.minimapDurationMs)
         d("tab_bar_height", &c.tabBarHeight)
         d("animation_duration_ms", &c.animationDurationMs)
         d("animation_damping", &c.animationDamping)
+        b("respect_reduce_motion", &c.respectReduceMotion)
+        b("reduce_motion_on_battery", &c.reduceMotionOnBattery)
         b("focus_follows_mouse", &c.focusFollowsMouse)
         b("mouse_follows_focus", &c.mouseFollowsFocus)
         if let f = o["swipe_gesture_fingers"]?.int, let v = SwipeFingers(rawValue: f) { c.swipeGestureFingers = v }
@@ -217,7 +252,17 @@ extension Config {
         b("launch_at_login", &c.launchAtLogin)
         b("onboarding_done", &c.onboardingDone)
         b("check_for_updates", &c.checkForUpdates)
-        if let arr = o["ignored_displays"]?.array { c.ignoredDisplays = arr.compactMap(\.string) }
+        if let v = o["builtin_display"]?.string, let m = DisplayMode(rawValue: v) { c.builtinDisplay = m }
+        if let v = o["external_displays"]?.string, let m = DisplayMode(rawValue: v) { c.externalDisplays = m }
+        // Older files listed switched-off displays in ignored_displays.
+        for uuid in o["ignored_displays"]?.array?.compactMap(\.string) ?? [] { c.displayOverrides[uuid] = .off }
+        for (uuid, v) in o["display_overrides"]?.table ?? [:] {
+            if let s = v.string, let ov = DisplayOverride(rawValue: s) { c.displayOverrides[uuid] = ov }
+        }
+        b("notify_display_changes", &c.notifyDisplayChanges)
+        b("release_input_when_idle", &c.releaseInputWhenIdle)
+        if let arr = o["pause_for_apps"]?.array { c.pauseForApps = arr.compactMap(\.string) }
+        b("show_menu_bar_icon", &c.showMenuBarIcon)
 
         if let binds = doc["bindings"]?.table {
             for (name, value) in binds {
@@ -264,6 +309,8 @@ extension Config {
         line("dock_aware", .bool(dockAware))
         line("width_step", .float(widthStep))
         line("height_step", .float(heightStep))
+        line("new_window_position", .string(newWindowPosition.rawValue), "next | end | start")
+        line("wrap_focus", .bool(wrapFocus), "focus wraps around at the ends of the strip")
         line("focus_border", .bool(focusBorder))
         line("focus_border_width", .float(focusBorderWidth))
         line("focus_border_color", .string(focusBorderColor), "#RRGGBB or #RRGGBBAA")
@@ -271,9 +318,13 @@ extension Config {
         line("dim_inactive", .bool(dimInactive))
         line("dim_inactive_opacity", .float(dimInactiveOpacity))
         line("minimap", .bool(minimap))
+        line("minimap_position", .string(minimapPosition.rawValue), "top | bottom")
+        line("minimap_duration_ms", .float(minimapDurationMs))
         line("tab_bar_height", .float(tabBarHeight))
         line("animation_duration_ms", .float(animationDurationMs), "0 turns animation off")
         line("animation_damping", .float(animationDamping), "1.0 = no overshoot, lower bounces")
+        line("respect_reduce_motion", .bool(respectReduceMotion), "follow macOS Reduce motion")
+        line("reduce_motion_on_battery", .bool(reduceMotionOnBattery), "no animation on battery / Low Power Mode")
         line("focus_follows_mouse", .bool(focusFollowsMouse))
         line("mouse_follows_focus", .bool(mouseFollowsFocus))
         line("swipe_gesture_fingers", .integer(swipeGestureFingers.rawValue), "3, 4, 5 or 0 = off")
@@ -283,7 +334,13 @@ extension Config {
         line("launch_at_login", .bool(launchAtLogin))
         line("onboarding_done", .bool(onboardingDone))
         line("check_for_updates", .bool(checkForUpdates))
-        line("ignored_displays", .array(ignoredDisplays.map { .string($0) }))
+        line("builtin_display", .string(builtinDisplay.rawValue), "always | alone (only when no other display) | never")
+        line("external_displays", .string(externalDisplays.rawValue), "always | alone | never")
+        line("display_overrides", .table(displayOverrides.mapValues { .string($0.rawValue) }), "display UUID = \"on\" | \"off\"")
+        line("notify_display_changes", .bool(notifyDisplayChanges))
+        line("release_input_when_idle", .bool(releaseInputWhenIdle), "free shortcuts and swipe when no display is managed")
+        line("pause_for_apps", .array(pauseForApps.map { .string($0) }), "bundle IDs that pause shortcuts while in front")
+        line("show_menu_bar_icon", .bool(showMenuBarIcon))
 
         out += "\n[bindings]\n"
         for action in Action.allCases {

@@ -338,6 +338,7 @@ public enum TOML {
         case .bool(let b): return b ? "true" : "false"
         case .array(let a): return "[" + a.map(format).joined(separator: ", ") + "]"
         case .table(let t):
+            if t.isEmpty { return "{}" }
             return "{ " + t.keys.sorted().map { "\(key($0)) = \(format(t[$0]!))" }.joined(separator: ", ") + " }"
         }
     }

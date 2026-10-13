@@ -21,6 +21,7 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("Carbon"),
+                .linkedFramework("IOKit"),
                 .linkedFramework("ServiceManagement"),
             ]
         ),
