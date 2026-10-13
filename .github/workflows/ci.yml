@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test
+        run: swift test
+      - name: Build app
+        run: UNIVERSAL=1 DMG=1 scripts/bundle.sh
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Roller
+          path: build/Roller-*.dmg
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" build/Roller-*.dmg \
+            --title "Roller ${GITHUB_REF_NAME#v}" --generate-notes
